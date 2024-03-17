@@ -1,5 +1,6 @@
 resource "aws_dynamodb_table" "collection" {
   name           = "snap-collection"
+  depends_on =  [aws_lambda_function.add_card]
   billing_mode   = "PROVISIONED"
   read_capacity  = 20
   write_capacity = 20
@@ -89,18 +90,12 @@ resource "aws_lambda_function" "remove_card" {
   function_name = "lambda_function_remove_card"
   role          = aws_iam_role.iam_for_lambda.arn
   filename   = data.archive_file.remove_cardzip.output_path
-  handler       = "remove_card.handler"
+  handler       = "remove_card.lambda_handler"
   runtime = "python3.9"
   }
 
 resource "aws_api_gateway_rest_api" "api_snap_collection" {
   name        = "snap_collection_api"
-}
-
-resource "aws_api_gateway_resource" "add-card" {
-  rest_api_id = aws_api_gateway_rest_api.api_snap_collection.id
-  parent_id   = aws_api_gateway_rest_api.api_snap_collection.root_resource_id
-  path_part   = "add-card" 
 }
 
 resource "aws_api_gateway_method" "add-card-method" {
@@ -109,6 +104,14 @@ resource "aws_api_gateway_method" "add-card-method" {
   http_method   = "POST" 
   authorization = "NONE" 
 }
+
+resource "aws_api_gateway_resource" "add-card" {
+  rest_api_id = aws_api_gateway_rest_api.api_snap_collection.id
+  parent_id   = aws_api_gateway_rest_api.api_snap_collection.root_resource_id
+  path_part   = "add-card" 
+}
+
+
 
 resource "aws_api_gateway_integration" "integration_add" {
   rest_api_id             = aws_api_gateway_rest_api.api_snap_collection.id
@@ -132,7 +135,7 @@ resource "aws_lambda_permission" "apigw_lambda_permission_add" {
 resource "aws_api_gateway_resource" "remove-card" {
   rest_api_id = aws_api_gateway_rest_api.api_snap_collection.id
   parent_id   = aws_api_gateway_rest_api.api_snap_collection.root_resource_id
-  path_part   = "add-card" 
+  path_part   = "remove-card" 
 }
 
 resource "aws_api_gateway_method" "remove-card-method" {
@@ -159,6 +162,35 @@ resource "aws_lambda_permission" "apigw_lambda_permission_remove" {
   source_arn    = "arn:aws:execute-api:${var.aws_region}:${var.aws_account_id}:${aws_api_gateway_rest_api.api_snap_collection.id}/*/*"
 }
 
+
+
 resource "aws_api_gateway_deployment" "deployment" {
   rest_api_id = aws_api_gateway_rest_api.api_snap_collection.id
+
+  triggers = {
+    # NOTE: The configuration below will satisfy ordering considerations,
+    #       but not pick up all future REST API changes. More advanced patterns
+    #       are possible, such as using the filesha1() function against the
+    #       Terraform configuration file(s) or removing the .id references to
+    #       calculate a hash against whole resources. Be aware that using whole
+    #       resources will show a difference after the initial implementation.
+    #       It will stabilize to only change when resources change afterwards.
+    redeployment = sha1(jsonencode([
+      aws_api_gateway_resource.add-card.id,
+      aws_api_gateway_resource.remove-card.id,
+      aws_api_gateway_method.add-card-method.id,
+      aws_api_gateway_method.remove-card-method.id,
+      aws_api_gateway_integration.integration_add.id,
+      aws_api_gateway_integration.integration_remove.id,
+    ]))
+  }
+
+  lifecycle {
+    create_before_destroy = true
+  }
+}
+resource "aws_api_gateway_stage" "test_stage" {
+  stage_name    = "dev"
+  deployment_id = aws_api_gateway_deployment.deployment.id
+  rest_api_id   = aws_api_gateway_rest_api.api_snap_collection.id
 }
